@@ -1,0 +1,90 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright © 2026 Andrea Genovese
+
+# Overlay — container-per-job via broker, PULL-based (mirrors docker-compose.broker.yml).
+#
+#   docker compose -f docker-compose.hub.yml -f docker-compose.hub.broker.yml up -d
+#
+# Every python/node skill/sandbox execution becomes an ephemeral, hardened CONTAINER-JOB
+# launched by the `broker` (the only component with the Docker socket). The jobs run in
+# the PULLED runner image (BROKER_RUNNER_IMAGE below) — install-hub.sh `docker pull`s it,
+# since no long-running service references it and compose would not pull it otherwise.
+#
+# Host-path constraint: the jobs are sibling containers on the host daemon, so the shared
+# folders are BIND-MOUNTs at the SAME absolute path inside the containers (host == container).
+# Set HOST_DATA_DIR (absolute host path) in the .env; install-hub.sh creates the subfolders.
+
+services:
+  broker:
+    image: ${ARKIMEDE_IMAGE_PREFIX:-ghcr.io/arkimedehq/arkimede}-broker:${ARKIMEDE_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      PORT: 4100
+      SERVICE_API_KEY: ${SERVICE_API_KEY}
+      BROKER_SKILLS_ROOT: ${HOST_DATA_DIR}/skills
+      BROKER_WORK_ROOT:   ${HOST_DATA_DIR}/work
+      BROKER_STATE_ROOT:  ${HOST_DATA_DIR}/state
+      BROKER_SANDBOX_ROOT: ${HOST_DATA_DIR}/sandbox
+      BROKER_SANDBOX_OUTPUT: ${HOST_DATA_DIR}/skills-output
+      # The jobs run in the PULLED runner image (not a local `pa-runner` build).
+      BROKER_RUNNER_IMAGE: ${ARKIMEDE_IMAGE_PREFIX:-ghcr.io/arkimedehq/arkimede}-runner:${ARKIMEDE_VERSION:-latest}
+      BROKER_NETWORK: none
+      BROKER_ALLOWED_NETWORKS: arkimede-internal,${SANDBOX_OPEN_NETWORK:-bridge},${JOB_EGRESS_NETWORK:-},${BROKER_ALLOWED_NETWORKS:-}
+      BROKER_ALLOW_RUNSC: ${BROKER_ALLOW_RUNSC:-0}
+      BROKER_ALLOW_PRIVILEGED_SANDBOX: ${BROKER_ALLOW_PRIVILEGED_SANDBOX:-0}
+      BROKER_NIX_VOLUME: ${BROKER_NIX_VOLUME:-arkimede_nix_store}
+      BROKER_NIX_STORE: ${BROKER_NIX_STORE:-}
+      JOB_MEMORY: ${JOB_MEMORY:-256m}
+      JOB_PIDS: ${JOB_PIDS:-128}
+      JOB_TIMEOUT_MS: ${JOB_TIMEOUT_MS:-120000}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:4100/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  skill-executor:
+    depends_on:
+      broker:
+        condition: service_healthy
+    environment:
+      BROKER_URL: http://broker:4100
+      SKILLS_BASE_PATH:         ${HOST_DATA_DIR}/skills
+      SKILLS_HOST_BASE:         ${HOST_DATA_DIR}/skills
+      WORK_HOST_BASE:           ${HOST_DATA_DIR}/work
+      SKILL_STATE_HOST_BASE:    ${HOST_DATA_DIR}/state
+      SKILLS_OUTPUT_HOST_BASE:  ${HOST_DATA_DIR}/skills-output
+      SKILLS_OUTPUT_DIR:        ${HOST_DATA_DIR}/skills-output
+      SANDBOX_SESSIONS_BASE:    ${HOST_DATA_DIR}/sandbox
+      SANDBOX_SESSION_HOST_BASE: ${HOST_DATA_DIR}/sandbox
+      SANDBOX_OPEN_NETWORK:     ${SANDBOX_OPEN_NETWORK:-bridge}
+      JOB_RUNTIME:        ${JOB_RUNTIME:-runc}
+      JOB_EGRESS_NETWORK: ${JOB_EGRESS_NETWORK:-}
+      JOB_INTERNAL_NETWORK: ${JOB_INTERNAL_NETWORK:-arkimede-internal}
+      BROKER_GLOBAL_NETWORKS: ${BROKER_GLOBAL_NETWORKS:-}
+    volumes:
+      - ${HOST_DATA_DIR}/skills:${HOST_DATA_DIR}/skills
+      - ${HOST_DATA_DIR}/work:${HOST_DATA_DIR}/work
+      - ${HOST_DATA_DIR}/state:${HOST_DATA_DIR}/state
+      - ${HOST_DATA_DIR}/skills-output:${HOST_DATA_DIR}/skills-output
+      - ${HOST_DATA_DIR}/sandbox:${HOST_DATA_DIR}/sandbox
+
+  backend:
+    environment:
+      SKILLS_BASE_PATH:  ${HOST_DATA_DIR}/skills
+      SKILLS_OUTPUT_DIR: ${HOST_DATA_DIR}/skills-output
+      SKILL_NETWORK_CATALOG: ${SKILL_NETWORK_CATALOG:-}
+    volumes:
+      - ${HOST_DATA_DIR}/skills:${HOST_DATA_DIR}/skills
+      - ${HOST_DATA_DIR}/skills-output:${HOST_DATA_DIR}/skills-output
+    networks:
+      - default
+      - arkimede-internal
+
+networks:
+  arkimede-internal:
+    name: arkimede-internal
+    driver: bridge
+    internal: true

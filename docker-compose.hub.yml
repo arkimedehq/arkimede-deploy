@@ -1,0 +1,190 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright © 2026 Andrea Genovese
+
+# docker-compose.hub.yml — BASE configuration for the PULL-based deployment.
+#
+# Same topology as the source repo's docker-compose.yml, but the first-party services
+# reference PRE-BUILT images from the GitHub Container Registry instead of building from
+# source. Nothing is compiled locally: `docker compose ... up -d` pulls and runs.
+#
+# Image ref = ${ARKIMEDE_IMAGE_PREFIX:-ghcr.io/arkimedehq/arkimede}-<service>:${ARKIMEDE_VERSION:-latest}
+# Override ARKIMEDE_VERSION in the .env to pin a release; ARKIMEDE_IMAGE_PREFIX to use a fork/mirror.
+#
+# The internal services (postgres, qdrant, redis, embedding, whisper, skill-executor) do
+# NOT expose ports to the host — only backend and frontend are reachable.
+#
+#   Prod:  docker compose -f docker-compose.hub.yml up -d
+#
+# Required in the .env (install-hub.sh generates them): DB_PASSWORD, JWT_SECRET,
+# TOOL_SECRETS_KEY, RUN_TOKEN_SECRET, SERVICE_API_KEY.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD}     # no default: must be set (empty → postgres won't start)
+      POSTGRES_DB: ${DB_NAME:-arkimede}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+    # Qdrant's image ships no curl/wget/shell → backend's depends_on uses service_started.
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  embedding:
+    # The model (default mxbai-embed-large-v1) and the device (cpu/cuda) are BAKED into
+    # the image at build time. EMBEDDING_IMAGE_TAG selects the variant: `latest` (cpu) or
+    # `latest-cuda` — install-hub.sh sets it. Overriding EMBEDDING_MODEL below still works,
+    # it just re-downloads the model on first start instead of using the baked one.
+    image: ${ARKIMEDE_IMAGE_PREFIX:-ghcr.io/arkimedehq/arkimede}-embedding:${EMBEDDING_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-mixedbread-ai/mxbai-embed-large-v1}
+      EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cpu}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-32}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  whisper:
+    image: ${ARKIMEDE_IMAGE_PREFIX:-ghcr.io/arkimedehq/arkimede}-whisper:${ARKIMEDE_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      WHISPER_MODEL: ${WHISPER_MODEL:-small}
+      WHISPER_DEVICE: ${WHISPER_DEVICE:-cpu}
+      WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-int8}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:9000/health').status==200 else 1)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  skill-executor:
+    image: ${ARKIMEDE_IMAGE_PREFIX:-ghcr.io/arkimedehq/arkimede}-executor:${ARKIMEDE_VERSION:-latest}
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: '1.0'
+          pids: 256
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    ulimits:
+      nofile: { soft: 1024, hard: 2048 }
+      nproc:  512
+      fsize:  268435456
+    environment:
+      PORT: 4000
+      HOST: ${EXECUTOR_HOST:-0.0.0.0}
+      SKILLS_BASE_PATH: /app/skills
+      MAX_TIMEOUT_MS: ${SKILL_MAX_TIMEOUT_MS:-30000}
+      MAX_OUTPUT_BYTES: ${SKILL_MAX_OUTPUT_BYTES:-524288}
+      MAX_CONCURRENT: ${SKILL_MAX_CONCURRENT:-5}
+      JS_MEMORY_LIMIT_MB: ${SKILL_JS_MEMORY_MB:-128}
+      INSTALL_TIMEOUT_MS: ${SKILL_INSTALL_TIMEOUT_MS:-300000}
+      BACKEND_INTERNAL_URL: http://backend:3000
+      SERVICE_API_KEY: ${SERVICE_API_KEY}
+      SANDBOX_ALLOW_INPROCESS: ${SANDBOX_ALLOW_INPROCESS:-0}
+      SANDBOX_SESSION_TTL_MS:    ${SANDBOX_SESSION_TTL_MS:-86400000}
+      SANDBOX_GC_INTERVAL_MS:    ${SANDBOX_GC_INTERVAL_MS:-3600000}
+      SANDBOX_SESSION_MAX_BYTES: ${SANDBOX_SESSION_MAX_BYTES:-524288000}
+      SANDBOX_TIMEOUT_MS:        ${SANDBOX_TIMEOUT_MS:-120000}
+    volumes:
+      - nix_store:/nix
+      - skills_data:/app/skills
+      - uploads:/app/uploads
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 180s
+
+  backend:
+    image: ${ARKIMEDE_IMAGE_PREFIX:-ghcr.io/arkimedehq/arkimede}-backend:${ARKIMEDE_VERSION:-latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      NODE_OPTIONS: --openssl-legacy-provider
+      DB_HOST: postgres
+      QDRANT_URL: http://qdrant:6333
+      EMBEDDING_BASE_URL: http://embedding:8000/v1
+      TRANSCRIPTION_BASE_URL: http://whisper:9000/v1
+      SKILL_EXECUTOR_URL: http://skill-executor:4000
+      REDIS_URL: redis://redis:6379
+      UPLOAD_DIR: /app/uploads
+      SKILLS_BASE_PATH: /app/skills
+      SKILLS_OUTPUT_DIR: /app/uploads/skills-output
+      BACKUP_DIR: /app/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      embedding:
+        condition: service_healthy
+      whisper:
+        condition: service_started
+      skill-executor:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    volumes:
+      - uploads:/app/uploads
+      - skills_data:/app/skills
+      - backups:/app/backups
+
+  frontend:
+    image: ${ARKIMEDE_IMAGE_PREFIX:-ghcr.io/arkimedehq/arkimede}-frontend:${ARKIMEDE_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  redis_data:
+  uploads:
+  skills_data:
+  backups:
+  nix_store:

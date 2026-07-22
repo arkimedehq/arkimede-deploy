@@ -1,0 +1,69 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright © 2026 Andrea Genovese
+
+# Overlay — egress allowlist, PULL-based (mirrors docker-compose.egress.yml).
+#
+#   docker compose -f docker-compose.hub.yml -f docker-compose.hub.egress.yml \
+#                  -f docker-compose.hub.broker.yml up -d
+#
+# Puts skill-executor on an internal network without a gateway (`sandboxnet`): jobs reach
+# the internet ONLY through the egress-proxy, which enforces the domain allowlist. Unlike
+# the source overlay, squid.conf is BAKED into the egress-proxy image (no source tree to
+# bind-mount here); the dynamic allowlist include is still shared via the egress_dynamic
+# volume. Only ever combined with the broker overlay.
+
+services:
+  egress-proxy:
+    image: ${ARKIMEDE_IMAGE_PREFIX:-ghcr.io/arkimedehq/arkimede}-egress-proxy:${ARKIMEDE_VERSION:-latest}
+    restart: unless-stopped
+    volumes:
+      - egress_dynamic:/etc/squid/dynamic
+    networks:
+      - sandboxnet
+      - appnet
+    healthcheck:
+      test: ["CMD-SHELL", "squid -k parse || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  skill-executor:
+    environment:
+      HTTP_PROXY:  http://egress-proxy:3128
+      HTTPS_PROXY: http://egress-proxy:3128
+      NO_PROXY:    localhost,127.0.0.1,backend,skill-executor,broker
+    networks:
+      - sandboxnet
+
+  broker:
+    networks:
+      - sandboxnet
+
+  backend:
+    environment:
+      EGRESS_DYNAMIC_DIR: /etc/egress
+    volumes:
+      - egress_dynamic:/etc/egress
+    networks:
+      - appnet
+      - sandboxnet
+
+  # embedding and whisper are internal services the backend calls (embeddings and
+  # transcription): both MUST share a network with the backend, which here is appnet.
+  postgres:   { networks: [appnet] }
+  qdrant:     { networks: [appnet] }
+  redis:      { networks: [appnet] }
+  embedding:  { networks: [appnet] }
+  whisper:    { networks: [appnet] }
+  frontend:   { networks: [appnet] }
+
+networks:
+  appnet:
+    driver: bridge
+  sandboxnet:
+    name: sandboxnet
+    driver: bridge
+    internal: true
+
+volumes:
+  egress_dynamic:
