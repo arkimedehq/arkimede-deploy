@@ -81,6 +81,20 @@ Everything is set in `.env`. The ones that matter most:
 
 Pin `ARKIMEDE_VERSION` to a specific tag to control exactly when you move.
 
+## Terminal client (optional)
+
+The stack you just deployed is fully usable from the browser. If you also
+want to chat from the shell, the `arkimede` CLI is a separate npm package
+(it is not part of the Docker images):
+
+```bash
+npm install -g arkimede-cli
+arkimede login --url http://localhost:3000
+arkimede    # full-screen TUI
+```
+
+Reference: [CLI.md](https://github.com/arkimedehq/arkimede/blob/main/docs/CLI.md).
+
 ## License
 
 The deployment artifacts in this repo are **AGPL-3.0** (see `LICENSE`), like the rest of
