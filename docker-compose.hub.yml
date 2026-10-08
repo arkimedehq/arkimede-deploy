@@ -1,30 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright © 2026 Andrea Genovese
 
-# docker-compose.hub.yml — BASE configuration for the PULL-based deployment.
-#
-# Same topology as the source repo's docker-compose.yml, but the first-party services
-# reference PRE-BUILT images from the GitHub Container Registry instead of building from
-# source. Nothing is compiled locally: `docker compose ... up -d` pulls and runs.
-#
-# Image ref = ${ARKIMEDE_IMAGE_PREFIX:-ghcr.io/arkimedehq/arkimede}-<service>:${ARKIMEDE_VERSION:-latest}
-# Override ARKIMEDE_VERSION in the .env to pin a release; ARKIMEDE_IMAGE_PREFIX to use a fork/mirror.
-#
-# The internal services (postgres, qdrant, redis, embedding, whisper, skill-executor) do
-# NOT expose ports to the host — only backend and frontend are reachable.
-#
-#   Prod:  docker compose -f docker-compose.hub.yml up -d
-#
-# Required in the .env (install-hub.sh generates them): DB_PASSWORD, JWT_SECRET,
-# TOOL_SECRETS_KEY, RUN_TOKEN_SECRET, SERVICE_API_KEY.
+# GENERATED from docker-compose.yml of https://github.com/arkimedehq/arkimede by
+# scripts/gen-deploy-bundle.py — do not edit here: change the source compose file.
+# First-party services PULL pre-built images (ghcr.io/arkimedehq/arkimede-<service>)
+# instead of building from source; pin ARKIMEDE_VERSION in .env for reproducibility.
 
 services:
   postgres:
-    image: postgres:16-alpine
+    # pgvector's image (Debian/glibc) instead of postgres:16-alpine (musl): same major,
+    # env vars and data path, plus the `vector` extension for services co-hosted on this
+    # Postgres (e.g. Recordare, own database + user). EXISTING data dirs created by the
+    # alpine image: run ./scripts/postgres-to-pgvector.sh once (text indexes must be rebuilt
+    # because glibc sorts text differently). Fresh installs need nothing.
+    image: pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${DB_PASSWORD}     # no default: must be set (empty → postgres won't start)
+      POSTGRES_PASSWORD: ${DB_PASSWORD}     # no default: must be set in prod (empty → postgres won't start)
       POSTGRES_DB: ${DB_NAME:-arkimede}
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -39,7 +32,8 @@ services:
     restart: unless-stopped
     volumes:
       - qdrant_data:/qdrant/storage
-    # Qdrant's image ships no curl/wget/shell → backend's depends_on uses service_started.
+    # Qdrant's image ships no curl/wget/shell → no in-container HTTP healthcheck is
+    # possible; backend's depends_on uses `service_started` for qdrant instead.
 
   redis:
     image: redis:7-alpine
@@ -54,16 +48,13 @@ services:
       retries: 5
 
   embedding:
-    # The model (default mxbai-embed-large-v1) and the device (cpu/cuda) are BAKED into
-    # the image at build time. EMBEDDING_IMAGE_TAG selects the variant: `latest` (cpu) or
-    # `latest-cuda` — install-hub.sh sets it. Overriding EMBEDDING_MODEL below still works,
-    # it just re-downloads the model on first start instead of using the baked one.
     image: ${ARKIMEDE_IMAGE_PREFIX:-ghcr.io/arkimedehq/arkimede}-embedding:${EMBEDDING_IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-mixedbread-ai/mxbai-embed-large-v1}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
       EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cpu}
       EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-32}
+      EMBEDDING_MAX_SEQ_LENGTH: ${EMBEDDING_MAX_SEQ_LENGTH:-}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
       interval: 15s
@@ -77,12 +68,48 @@ services:
       WHISPER_MODEL: ${WHISPER_MODEL:-small}
       WHISPER_DEVICE: ${WHISPER_DEVICE:-cpu}
       WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-int8}
+      WHISPER_MODELS_DIR: /models
+    volumes:
+      - whisper_models:/models
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:9000/health').status==200 else 1)"]
       interval: 15s
       timeout: 10s
       retries: 5
-      start_period: 60s
+      start_period: 60s          # loading the Whisper model may take a while
+    # No port exposed to the host: reachable only by the backend (internal network)
+
+  piper:
+    image: ${ARKIMEDE_IMAGE_PREFIX:-ghcr.io/arkimedehq/arkimede}-piper:${ARKIMEDE_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      PIPER_VOICE: ${PIPER_VOICE:-it_IT-serena-medium}
+      PIPER_MODELS_DIR: /models
+      PIPER_OFFLINE: ${PIPER_OFFLINE:-0}
+    volumes:
+      - piper_models:/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:9100/health').status==200 else 1)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s          # loading the Piper voice may take a while
+    # No port exposed to the host: reachable only by the backend (internal network)
+
+  ocr:
+    image: ${ARKIMEDE_IMAGE_PREFIX:-ghcr.io/arkimedehq/arkimede}-ocr:${OCR_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      OCR_LANGUAGES: ${OCR_LANGUAGES:-ita+eng}
+      OCR_CONCURRENCY: ${OCR_CONCURRENCY:-1}
+      OCR_MAX_PAGES: ${OCR_MAX_PAGES:-500}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:9200/health').status==200 else 1)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    # No port exposed to the host: reachable only by the backend (internal network)
 
   skill-executor:
     image: ${ARKIMEDE_IMAGE_PREFIX:-ghcr.io/arkimedehq/arkimede}-executor:${ARKIMEDE_VERSION:-latest}
@@ -92,58 +119,83 @@ services:
         limits:
           memory: 1g
           cpus: '1.0'
-          pids: 256
-    cap_drop: [ALL]
+          pids: 256                       # contains fork-bombs at the container level
+    # ── Execution hardening (D1) ────────────────────────────────────────────────
+    cap_drop: [ALL]                       # skills don't need Linux capabilities
     security_opt:
-      - no-new-privileges:true
+      - no-new-privileges:true            # no escalation via setuid
     ulimits:
-      nofile: { soft: 1024, hard: 2048 }
-      nproc:  512
-      fsize:  268435456
+      nofile: { soft: 1024, hard: 2048 }  # max file descriptors (anti fd-exhaustion)
+      nproc:  512                         # max processes
+      fsize:  268435456                   # 256MB = max single file (anti disk-fill)
+    # read_only: true + tmpfs requires writable dirs for pip/npm/nix cache:
+    # enable AFTER verifying the install against the real stack.
+    #   read_only: true
+    #   tmpfs: [/tmp, /home/executor/.cache, /home/executor/.npm]
     environment:
       PORT: 4000
-      HOST: ${EXECUTOR_HOST:-0.0.0.0}
+      HOST: ${EXECUTOR_HOST:-0.0.0.0}          # bind address INSIDE the container — KEEP 0.0.0.0
       SKILLS_BASE_PATH: /app/skills
       MAX_TIMEOUT_MS: ${SKILL_MAX_TIMEOUT_MS:-30000}
       MAX_OUTPUT_BYTES: ${SKILL_MAX_OUTPUT_BYTES:-524288}
+      SKILL_MAX_INPUT_MB: ${SKILL_MAX_INPUT_MB:-20}   # max script input (e.g. dataset rows passed between skills)
       MAX_CONCURRENT: ${SKILL_MAX_CONCURRENT:-5}
       JS_MEMORY_LIMIT_MB: ${SKILL_JS_MEMORY_MB:-128}
       INSTALL_TIMEOUT_MS: ${SKILL_INSTALL_TIMEOUT_MS:-300000}
       BACKEND_INTERNAL_URL: http://backend:3000
-      SERVICE_API_KEY: ${SERVICE_API_KEY}
+      SERVICE_API_KEY: ${SERVICE_API_KEY}      # auth mesh: backend→executor (and executor→broker)
+      # In-process sandbox fallback (L1, no broker): 1 = run the run_in_sandbox tool
+      # IN-PROCESS (NOT isolated) — dev/trusted only. Default 0 = fail-closed. With the
+      # broker overlay the jobs are isolated regardless and this stays 0.
       SANDBOX_ALLOW_INPROCESS: ${SANDBOX_ALLOW_INPROCESS:-0}
-      SANDBOX_SESSION_TTL_MS:    ${SANDBOX_SESSION_TTL_MS:-86400000}
-      SANDBOX_GC_INTERVAL_MS:    ${SANDBOX_GC_INTERVAL_MS:-3600000}
-      SANDBOX_SESSION_MAX_BYTES: ${SANDBOX_SESSION_MAX_BYTES:-524288000}
-      SANDBOX_TIMEOUT_MS:        ${SANDBOX_TIMEOUT_MS:-120000}
+      # Sandbox session workspaces (per-chat): GC + disk quota + execution timeout.
+      SANDBOX_SESSION_TTL_MS:    ${SANDBOX_SESSION_TTL_MS:-86400000}      # 24h idle → reclaimed
+      SANDBOX_GC_INTERVAL_MS:    ${SANDBOX_GC_INTERVAL_MS:-3600000}       # GC sweep every 1h
+      SANDBOX_SESSION_MAX_BYTES: ${SANDBOX_SESSION_MAX_BYTES:-524288000}  # 500MB per session (0 = off)
+      SANDBOX_TIMEOUT_MS:        ${SANDBOX_TIMEOUT_MS:-120000}            # 120s (runtime installs need >30s)
     volumes:
-      - nix_store:/nix
+      - nix_store:/nix           # persistent Nix store — survives container rebuilds
       - skills_data:/app/skills
-      - uploads:/app/uploads
+      - uploads:/app/uploads     # shared with backend → PDFs are servable via /api/files
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
       interval: 15s
       timeout: 5s
       retries: 3
+      # On the FIRST start with an empty /nix volume the entrypoint installs single-user
+      # Nix + updates the nixpkgs channel synchronously before node listens — this can take
+      # a couple of minutes. Without a grace window the container is marked unhealthy at ~45s
+      # and the backend's depends_on aborts the whole `up`. Failures during start_period do
+      # not count, so node has time to come up on a cold /nix volume.
       start_period: 180s
+    # No port exposed to the host: reachable only by the backend (internal network)
 
   backend:
     image: ${ARKIMEDE_IMAGE_PREFIX:-ghcr.io/arkimedehq/arkimede}-backend:${ARKIMEDE_VERSION:-latest}
     restart: unless-stopped
     env_file: .env
+    # Authoritative overrides for the container: the .env (single, at the root)
+    # carries the local DEV defaults (host=localhost, path ./uploads); here we bring
+    # them back to the container-internal values, so the same .env serves dev and Docker.
     environment:
       NODE_ENV: production
+      # Enable the legacy OpenSSL provider: SMB share NTLM auth uses DES/MD4 (legacy,
+      # disabled by default in OpenSSL 3) → without it, SMB connections throw
+      # ERR_OSSL_EVP_UNSUPPORTED and crash the process.
       NODE_OPTIONS: --openssl-legacy-provider
       DB_HOST: postgres
       QDRANT_URL: http://qdrant:6333
       EMBEDDING_BASE_URL: http://embedding:8000/v1
       TRANSCRIPTION_BASE_URL: http://whisper:9000/v1
+      TTS_BASE_URL: http://piper:9100/v1
+      OCR_BASE_URL: http://ocr:9200
+      WYOMING_PORT: ${WYOMING_PORT:-10300}
       SKILL_EXECUTOR_URL: http://skill-executor:4000
       REDIS_URL: redis://redis:6379
       UPLOAD_DIR: /app/uploads
       SKILLS_BASE_PATH: /app/skills
       SKILLS_OUTPUT_DIR: /app/uploads/skills-output
-      BACKUP_DIR: /app/backups
+      BACKUP_DIR: /app/backups           # admin backup archives (persisted volume)
     depends_on:
       postgres:
         condition: service_healthy
@@ -154,12 +206,21 @@ services:
       embedding:
         condition: service_healthy
       whisper:
-        condition: service_started
+        condition: service_started   # on-demand transcription: does not block boot on model loading
+      piper:
+        condition: service_started   # on-demand TTS: does not block boot on voice loading
+      ocr:
+        condition: service_started   # on-demand OCR: missing/unhealthy only degrades the OCR levels
       skill-executor:
         condition: service_healthy
     ports:
-      - "3000:3000"
+      - "3000:3000"              # public API entry point
+      # Wyoming voice server for Home Assistant & co. Nothing listens until an admin
+      # enables it in the app (Settings → "Wyoming voice server") → connection refused.
+      - "${WYOMING_PORT:-10300}:${WYOMING_PORT:-10300}"
     healthcheck:
+      # Public /api/health probe (no JWT). Uses busybox wget (node:20-alpine has it,
+      # not curl). --spider = HEAD-less GET, returns non-zero on 5xx (e.g. 503 when DB down).
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
       interval: 15s
       timeout: 5s
@@ -174,9 +235,11 @@ services:
     image: ${ARKIMEDE_IMAGE_PREFIX:-ghcr.io/arkimedehq/arkimede}-frontend:${ARKIMEDE_VERSION:-latest}
     restart: unless-stopped
     environment:
+      # Upload cap for the nginx proxy (client_max_body_size, via the envsubst
+      # template). Same env drives the backend Multer limit (there via env_file).
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
     ports:
-      - "5173:80"
+      - "5173:80"                # public SPA entry point
     depends_on:
       - backend
 
@@ -186,5 +249,7 @@ volumes:
   redis_data:
   uploads:
   skills_data:
-  backups:
-  nix_store:
+  backups:               # admin backup archives (pg_dump + volumes), downloadable from the UI
+  nix_store:             # persistent /nix/store for the executor — avoids re-download on rebuild
+  piper_models:          # Piper voices (.onnx) — survive rebuilds, on-demand downloads land here
+  whisper_models:        # Whisper model cache — seeded with the default model, runtime switches land here

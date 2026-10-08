@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright © 2026 Andrea Genovese
+
+# GENERATED from docker-compose.novoice.yml of https://github.com/arkimedehq/arkimede by
+# scripts/gen-deploy-bundle.py — do not edit here: change the source compose file.
+# First-party services PULL pre-built images (ghcr.io/arkimedehq/arkimede-<service>)
+# instead of building from source; pin ARKIMEDE_VERSION in .env for reproducibility.
+
+services:
+  whisper:
+    profiles: ["voice"]
+
+  piper:
+    profiles: ["voice"]
+
+  backend:
+    depends_on: !override
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      embedding:
+        condition: service_healthy
+      skill-executor:
+        condition: service_healthy

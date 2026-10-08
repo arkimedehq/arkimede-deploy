@@ -127,6 +127,17 @@ case "$emb_dev" in
   *)    warn "invalid value \"$emb_dev\": using cpu"; set_env EMBEDDING_DEVICE cpu; set_env EMBEDDING_IMAGE_TAG "${ark_ver}" ;;
 esac
 
+# OCR image variant (PDF/image indexing). Like the embedding device, it only SELECTS the
+# image tag: full = Docling + RapidOCR ("structured" level, ~4 GB), light = Tesseract only
+# ("fast" level, ~0.5 GB).
+cur_ocr="$(get_env OCR_IMAGE_TAG)"; [[ "$cur_ocr" == *-light ]] && def_ocr=light || def_ocr=full
+ocr_var="$(ask "OCR image — full (structured layout, ~4 GB) | light (Tesseract only, ~0.5 GB)" "$def_ocr")"
+case "$ocr_var" in
+  light) set_env OCR_IMAGE_TAG "${ark_ver}-light"; ok "OCR light image (fast level only)" ;;
+  full)  set_env OCR_IMAGE_TAG "${ark_ver}"; ok "OCR full image (fast + structured levels)" ;;
+  *)     warn "invalid value \"$ocr_var\": using full"; set_env OCR_IMAGE_TAG "${ark_ver}" ;;
+esac
+
 if (( IS_PROD )); then
   if weak DB_PASSWORD; then
     if yesno "DB_PASSWORD is weak/missing: generate a strong one?" "Y"; then
@@ -212,6 +223,16 @@ else
   fi
 fi
 
+# Voice services: Whisper (speech-to-text) and Piper (text-to-speech). Without them the
+# app works normally; only the voice features (mic input, read-aloud, Wyoming) are off.
+echo
+if yesno "Run the voice services (Whisper speech-to-text + Piper text-to-speech, ~1.5 GB RAM)?" "Y"; then
+  ok "voice services enabled"
+else
+  COMPOSE_FILES+=("-f" "docker-compose.hub.novoice.yml")
+  warn "voice services disabled (re-run the installer to enable them)"
+fi
+
 # ── 4. Pull images ────────────────────────────────────────────────────────────
 step "4/6 · Pull images"
 if (( DRY )); then
@@ -261,7 +282,9 @@ fi
   printf 'COMPOSE_ARGS=('
   printf '%q ' "${COMPOSE_FILES[@]}"
   echo ')'
-} > "$ROOT/.compose-profile"
+} > "$ROOT/scripts/.compose-profile"
+# The maintenance scripts (update-hub.sh, scripts/backup.sh, scripts/postgres-to-pgvector.sh)
+# read the same file.
 
 cat > "$ROOT/compose.sh" <<'WRAP'
 #!/usr/bin/env bash
@@ -271,7 +294,7 @@ cat > "$ROOT/compose.sh" <<'WRAP'
 set -euo pipefail
 cd "$(dirname "$0")"
 set -a; [[ -f .env ]] && . .env; set +a
-source .compose-profile
+source scripts/.compose-profile
 exec docker compose "${COMPOSE_ARGS[@]}" "$@"
 WRAP
 chmod +x "$ROOT/compose.sh"

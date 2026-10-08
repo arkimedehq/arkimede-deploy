@@ -1,22 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright © 2026 Andrea Genovese
 
-# Overlay — egress allowlist, PULL-based (mirrors docker-compose.egress.yml).
-#
-#   docker compose -f docker-compose.hub.yml -f docker-compose.hub.egress.yml \
-#                  -f docker-compose.hub.broker.yml up -d
-#
-# Puts skill-executor on an internal network without a gateway (`sandboxnet`): jobs reach
-# the internet ONLY through the egress-proxy, which enforces the domain allowlist. Unlike
-# the source overlay, squid.conf is BAKED into the egress-proxy image (no source tree to
-# bind-mount here); the dynamic allowlist include is still shared via the egress_dynamic
-# volume. Only ever combined with the broker overlay.
+# GENERATED from docker-compose.egress.yml of https://github.com/arkimedehq/arkimede by
+# scripts/gen-deploy-bundle.py — do not edit here: change the source compose file.
+# First-party services PULL pre-built images (ghcr.io/arkimedehq/arkimede-<service>)
+# instead of building from source; pin ARKIMEDE_VERSION in .env for reproducibility.
 
 services:
   egress-proxy:
+    # Custom image = stock Squid + watcher entrypoint (hot reload of the
+    # allowlist via SIGHUP, without the Docker socket).
     image: ${ARKIMEDE_IMAGE_PREFIX:-ghcr.io/arkimedehq/arkimede}-egress-proxy:${ARKIMEDE_VERSION:-latest}
     restart: unless-stopped
     volumes:
+      - ./egress-proxy/squid.conf:/etc/squid/squid.conf:ro
+      # Skill domains include file: written by the backend, read/reloaded here.
       - egress_dynamic:/etc/squid/dynamic
     networks:
       - sandboxnet
@@ -35,12 +33,21 @@ services:
     networks:
       - sandboxnet
 
+  # The egress overlay moves skill-executor OFF the default network onto sandboxnet
+  # (internal, no internet). The broker (docker-compose.broker.yml) would otherwise stay
+  # only on the default network → the executor could not reach it ("[broker unreachable]").
+  # Attach the broker to sandboxnet too so the executor↔broker control channel works; the
+  # broker needs no internet itself (it launches jobs via the Docker socket, not the network).
+  # egress.yml is only ever combined with broker.yml (install.sh L3 ⟹ L2 broker), so this
+  # fragment never stands alone. At L2 (no egress) both share the default network instead.
   broker:
     networks:
       - sandboxnet
 
   backend:
     environment:
+      # Dir (same volume as egress-proxy) where skill-domains.conf is written.
+      # Set ONLY with this overlay → activates the egress synchronization.
       EGRESS_DYNAMIC_DIR: /etc/egress
     volumes:
       - egress_dynamic:/etc/egress
@@ -48,22 +55,29 @@ services:
       - appnet
       - sandboxnet
 
-  # embedding and whisper are internal services the backend calls (embeddings and
-  # transcription): both MUST share a network with the backend, which here is appnet.
+  # The infrastructure services stay on the network with internet (appnet).
+  # embedding, whisper, piper and ocr are internal services the backend calls (embeddings,
+  # transcription, speech, document OCR): all MUST share a network with the backend (appnet).
   postgres:   { networks: [appnet] }
   qdrant:     { networks: [appnet] }
   redis:      { networks: [appnet] }
   embedding:  { networks: [appnet] }
   whisper:    { networks: [appnet] }
+  piper:      { networks: [appnet] }
+  ocr:        { networks: [appnet] }
   frontend:   { networks: [appnet] }
 
 networks:
   appnet:
     driver: bridge
   sandboxnet:
+    # Fixed `name:` so JOB_EGRESS_NETWORK / BROKER_ALLOWED_NETWORKS reference the real
+    # network by a stable name, not the compose-project-prefixed one.
+    # → set JOB_EGRESS_NETWORK=sandboxnet and add it to BROKER_ALLOWED_NETWORKS.
     name: sandboxnet
     driver: bridge
-    internal: true
+    internal: true   # no gateway → no route to the internet
 
 volumes:
+  # Skill domains include file, shared backend (writes) ↔ egress-proxy (reads).
   egress_dynamic:
