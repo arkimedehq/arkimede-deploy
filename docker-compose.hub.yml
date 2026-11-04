@@ -21,6 +21,9 @@ services:
       POSTGRES_DB: ${DB_NAME:-arkimede}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # WAL spool of the continuous archiving (scripts/backup.sh → docs/BACKUP.md): idle
+      # until WAL archiving is switched on in Settings → Backup.
+      - wal_spool:/wal-spool
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
@@ -68,7 +71,15 @@ services:
       WHISPER_MODEL: ${WHISPER_MODEL:-small}
       WHISPER_DEVICE: ${WHISPER_DEVICE:-cpu}
       WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-int8}
+      WHISPER_BEAM_SIZE: ${WHISPER_BEAM_SIZE:-1}
+      WHISPER_CPU_THREADS: ${WHISPER_CPU_THREADS:-0}
       WHISPER_MODELS_DIR: /models
+      # Engine loaded at start: whisper (default) | parakeet (NVIDIA Parakeet TDT via sherpa-onnx, downloaded into /models
+      # on first use). The admin's pick in Settings → Voice & audio switches it at runtime.
+      STT_ENGINE: ${STT_ENGINE:-whisper}
+      PARAKEET_MODEL: ${PARAKEET_MODEL:-sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8}
+      PARAKEET_THREADS: ${PARAKEET_THREADS:-0}
+      PARAKEET_OFFLINE: ${PARAKEET_OFFLINE:-0}
     volumes:
       - whisper_models:/models
     healthcheck:
@@ -76,7 +87,7 @@ services:
       interval: 15s
       timeout: 10s
       retries: 5
-      start_period: 60s          # loading the Whisper model may take a while
+      start_period: 300s         # loading the model may take a while (Parakeet: ~490 MB download on first start)
     # No port exposed to the host: reachable only by the backend (internal network)
 
   piper:
@@ -250,6 +261,7 @@ volumes:
   uploads:
   skills_data:
   backups:               # admin backup archives (pg_dump + volumes), downloadable from the UI
+  wal_spool:             # finished WAL segments waiting to be moved to the backup destination
   nix_store:             # persistent /nix/store for the executor — avoids re-download on rebuild
   piper_models:          # Piper voices (.onnx) — survive rebuilds, on-demand downloads land here
   whisper_models:        # Whisper model cache — seeded with the default model, runtime switches land here
