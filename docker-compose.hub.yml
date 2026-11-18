@@ -162,7 +162,7 @@ services:
       # Sandbox session workspaces (per-chat): GC + disk quota + execution timeout.
       SANDBOX_SESSION_TTL_MS:    ${SANDBOX_SESSION_TTL_MS:-86400000}      # 24h idle → reclaimed
       SANDBOX_GC_INTERVAL_MS:    ${SANDBOX_GC_INTERVAL_MS:-3600000}       # GC sweep every 1h
-      SANDBOX_SESSION_MAX_BYTES: ${SANDBOX_SESSION_MAX_BYTES:-524288000}  # 500MB per session (0 = off)
+      SANDBOX_SESSION_MAX_BYTES: ${SANDBOX_SESSION_MAX_BYTES:-4294967296}  # 4GB per session (0 = off)
       SANDBOX_TIMEOUT_MS:        ${SANDBOX_TIMEOUT_MS:-120000}            # 120s (runtime installs need >30s)
     volumes:
       - nix_store:/nix           # persistent Nix store — survives container rebuilds

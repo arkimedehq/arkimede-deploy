@@ -35,7 +35,7 @@ services:
       BROKER_NIX_VOLUME: ${BROKER_NIX_VOLUME:-arkimede_nix_store}
       BROKER_NIX_STORE: ${BROKER_NIX_STORE:-}               # host path of the /nix store (alternative to the volume)
       SKILL_MAX_INPUT_MB: ${SKILL_MAX_INPUT_MB:-20}          # max job input — keep equal to the executor's
-      JOB_MEMORY: ${JOB_MEMORY:-256m}
+      JOB_MEMORY: ${JOB_MEMORY:-1g}
       JOB_PIDS: ${JOB_PIDS:-128}
       JOB_TIMEOUT_MS: ${JOB_TIMEOUT_MS:-120000}
     volumes:
